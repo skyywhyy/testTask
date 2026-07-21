@@ -1,0 +1,52 @@
+# CMake и каталоги сборки
+/build/
+/build-*/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+Testing/
+
+# Результаты сборки C/C++
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+*.app
+
+# Покрытие и профилирование
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# Временные файлы и логи
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE и редакторы
+.idea/
+.vscode/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+Desktop.ini
