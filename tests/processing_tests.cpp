@@ -3,6 +3,14 @@
 #include "test_utils.hpp"
 
 #include <string>
+#include <type_traits>
+
+static_assert(std::is_same_v<
+              decltype(&processing::calculate_sum),
+              int (*)(const std::string&) noexcept>);
+static_assert(std::is_same_v<
+              decltype(&processing::is_valid_sum),
+              bool (*)(const std::string&) noexcept>);
 
 namespace {
 

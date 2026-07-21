@@ -51,7 +51,7 @@ void transform(std::string& value)
     value = std::move(result);
 }
 
-int calculate_sum(std::string_view value) noexcept
+int calculate_sum(const std::string& value) noexcept
 {
     int sum = 0;
 
@@ -64,7 +64,7 @@ int calculate_sum(std::string_view value) noexcept
     return sum;
 }
 
-bool is_valid_sum(std::string_view value) noexcept
+bool is_valid_sum(const std::string& value) noexcept
 {
     if (value.size() <= 2) {
         return false;
