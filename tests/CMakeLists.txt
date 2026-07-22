@@ -110,6 +110,35 @@ if(NOT UNIX)
     return()
 endif()
 
+add_executable(tcp_client_tests
+    tcp_client_tests.cpp
+    ${CMAKE_SOURCE_DIR}/program1/src/tcp_client.cpp
+)
+
+target_include_directories(tcp_client_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/program1/include
+)
+
+target_link_libraries(tcp_client_tests
+    PRIVATE
+        Threads::Threads
+)
+
+target_compile_options(tcp_client_tests
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+add_test(
+    NAME tcp_client_tests
+    COMMAND tcp_client_tests
+)
+
+set_tests_properties(tcp_client_tests PROPERTIES TIMEOUT 10)
+
 add_executable(tcp_server_tests
     tcp_server_tests.cpp
     ${CMAKE_SOURCE_DIR}/program2/src/tcp_server.cpp
