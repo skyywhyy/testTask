@@ -85,6 +85,50 @@ public:
     program2::TcpServer server_;
 };
 
+void test_wait_for_client_reports_timeout_and_readiness()
+{
+    using namespace std::chrono_literals;
+
+    StartedServer fixture;
+    test_utils::expect_true(
+        fixture.server_.wait_for_client(20ms)
+            == program2::WaitResult::timeout,
+        "client wait times out without a connection");
+
+    RawClient client{fixture.server_.bound_port()};
+    test_utils::expect_true(
+        fixture.server_.wait_for_client(2s) == program2::WaitResult::ready,
+        "client wait reports a pending connection");
+    test_utils::expect_true(
+        fixture.server_.accept_client(), "accepts the pending connection");
+}
+
+void test_accept_without_pending_client_returns_promptly()
+{
+    using namespace std::chrono_literals;
+
+    StartedServer fixture;
+    auto pending_accept = std::async(std::launch::async, [&fixture] {
+        return fixture.server_.accept_client();
+    });
+
+    const bool returned_without_client =
+        pending_accept.wait_for(200ms) == std::future_status::ready;
+    test_utils::expect_true(
+        returned_without_client,
+        "accept without a pending client returns promptly");
+
+    if (!returned_without_client) {
+        RawClient teardown_client{fixture.server_.bound_port()};
+    }
+
+    test_utils::expect_false(
+        pending_accept.get(), "accept without a pending client reports failure");
+    test_utils::expect_true(
+        fixture.server_.last_accept_would_block(),
+        "accept distinguishes no pending client from a real error");
+}
+
 void expect_line(
     const std::optional<std::string>& actual,
     std::string_view expected,
@@ -139,6 +183,34 @@ void test_buffers_two_lines_from_one_send()
         "second buffered line is preserved");
 }
 
+void test_wait_for_message_reports_a_buffered_complete_line()
+{
+    using namespace std::chrono_literals;
+
+    StartedServer fixture;
+    RawClient client{fixture.server_.bound_port()};
+    test_utils::expect_true(
+        fixture.server_.accept_client(), "accepts client for message wait");
+
+    client.send_all("first\nsecond\n");
+    test_utils::expect_true(
+        fixture.server_.wait_for_message(2s) == program2::WaitResult::ready,
+        "message wait reports socket data");
+    expect_line(
+        fixture.server_.receive_line(),
+        "first",
+        "first message is received after readiness");
+
+    test_utils::expect_true(
+        fixture.server_.wait_for_message(20ms)
+            == program2::WaitResult::ready,
+        "message wait reports a complete line already in the buffer");
+    expect_line(
+        fixture.server_.receive_line(),
+        "second",
+        "buffered message is received without more socket data");
+}
+
 void test_receive_line_blocks_until_split_line_is_complete()
 {
     using namespace std::chrono_literals;
@@ -158,9 +230,13 @@ void test_receive_line_blocks_until_split_line_is_complete()
         "receive_line blocks on an incomplete line");
 
     client.send_all("8\n");
+    const bool line_ready =
+        pending_line.wait_for(2s) == std::future_status::ready;
     test_utils::expect_true(
-        pending_line.wait_for(2s) == std::future_status::ready,
-        "receive_line completes after newline arrives");
+        line_ready, "receive_line completes after newline arrives");
+    if (!line_ready) {
+        client.close();
+    }
     expect_line(
         pending_line.get(), "128", "split sends are combined into one line");
 }
@@ -199,9 +275,12 @@ void test_disconnect_drops_partial_line_and_allows_second_client()
 
 int main()
 {
+    test_wait_for_client_reports_timeout_and_readiness();
+    test_accept_without_pending_client_returns_promptly();
     test_port_zero_binds_an_ephemeral_port();
     test_receives_one_line_without_delimiter();
     test_buffers_two_lines_from_one_send();
+    test_wait_for_message_reports_a_buffered_complete_line();
     test_receive_line_blocks_until_split_line_is_complete();
     test_disconnect_drops_partial_line_and_allows_second_client();
 

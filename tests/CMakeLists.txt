@@ -106,6 +106,10 @@ add_test(
     COMMAND program2_message_tests
 )
 
+if(NOT UNIX)
+    return()
+endif()
+
 add_executable(tcp_server_tests
     tcp_server_tests.cpp
     ${CMAKE_SOURCE_DIR}/program2/src/tcp_server.cpp
@@ -134,3 +138,35 @@ add_test(
 )
 
 set_tests_properties(tcp_server_tests PROPERTIES TIMEOUT 10)
+
+add_executable(program2_application_tests
+    program2_application_tests.cpp
+    ${CMAKE_SOURCE_DIR}/program2/src/application.cpp
+    ${CMAKE_SOURCE_DIR}/program2/src/message_processor.cpp
+    ${CMAKE_SOURCE_DIR}/program2/src/tcp_server.cpp
+)
+
+target_include_directories(program2_application_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/program2/include
+)
+
+target_link_libraries(program2_application_tests
+    PRIVATE
+        processing
+        Threads::Threads
+)
+
+target_compile_options(program2_application_tests
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+add_test(
+    NAME program2_application_tests
+    COMMAND program2_application_tests
+)
+
+set_tests_properties(program2_application_tests PROPERTIES TIMEOUT 10)
