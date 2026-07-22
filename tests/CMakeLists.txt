@@ -18,3 +18,63 @@ add_test(
     NAME processing_tests
     COMMAND processing_tests
 )
+
+add_executable(shared_buffer_tests
+    shared_buffer_tests.cpp
+    ${CMAKE_SOURCE_DIR}/program1/src/shared_buffer.cpp
+)
+
+target_include_directories(shared_buffer_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/program1/include
+)
+
+target_link_libraries(shared_buffer_tests
+    PRIVATE
+        Threads::Threads
+)
+
+target_compile_options(shared_buffer_tests
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+add_test(
+    NAME shared_buffer_tests
+    COMMAND shared_buffer_tests
+)
+
+set_tests_properties(shared_buffer_tests PROPERTIES TIMEOUT 10)
+
+add_executable(application_tests
+    application_tests.cpp
+    ${CMAKE_SOURCE_DIR}/program1/src/application.cpp
+    ${CMAKE_SOURCE_DIR}/program1/src/shared_buffer.cpp
+)
+
+target_include_directories(application_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/program1/include
+)
+
+target_link_libraries(application_tests
+    PRIVATE
+        processing
+        Threads::Threads
+)
+
+target_compile_options(application_tests
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+add_test(
+    NAME application_tests
+    COMMAND application_tests
+)
+
+set_tests_properties(application_tests PROPERTIES TIMEOUT 10)
