@@ -48,10 +48,12 @@ add_test(
 
 set_tests_properties(shared_buffer_tests PROPERTIES TIMEOUT 10)
 
+if(UNIX)
 add_executable(application_tests
     application_tests.cpp
     ${CMAKE_SOURCE_DIR}/program1/src/application.cpp
     ${CMAKE_SOURCE_DIR}/program1/src/shared_buffer.cpp
+    ${CMAKE_SOURCE_DIR}/program1/src/tcp_client.cpp
 )
 
 target_include_directories(application_tests
@@ -62,6 +64,7 @@ target_include_directories(application_tests
 target_link_libraries(application_tests
     PRIVATE
         processing
+        project_common
         Threads::Threads
 )
 
@@ -78,6 +81,8 @@ add_test(
 )
 
 set_tests_properties(application_tests PROPERTIES TIMEOUT 10)
+
+endif()
 
 add_executable(program2_message_tests
     program2_message_tests.cpp
