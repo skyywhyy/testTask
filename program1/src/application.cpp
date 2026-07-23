@@ -4,7 +4,10 @@
 #include <processing/processing.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <istream>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <thread>
@@ -21,7 +24,8 @@ Application::Application(
           output,
           error_output,
           "127.0.0.1",
-          network_config::kDefaultPort}
+          network_config::kDefaultPort,
+          std::chrono::seconds{1}}
 {
 }
 
@@ -31,10 +35,28 @@ Application::Application(
     std::ostream& error_output,
     std::string host,
     std::uint16_t port)
+    : Application{
+          input,
+          output,
+          error_output,
+          std::move(host),
+          port,
+          std::chrono::seconds{1}}
+{
+}
+
+Application::Application(
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& error_output,
+    std::string host,
+    std::uint16_t port,
+    std::chrono::milliseconds retry_interval)
     : input_{input}
     , output_{output}
     , error_output_{error_output}
     , client_{std::move(host), port}
+    , retry_interval_{retry_interval}
 {
 }
 
@@ -45,12 +67,12 @@ int Application::run()
     try {
         input_loop();
     } catch (...) {
-        buffer_.stop();
+        stop();
         worker.join();
         throw;
     }
 
-    buffer_.stop();
+    stop();
     worker.join();
 
     if (worker_exception_) {
@@ -98,34 +120,77 @@ void Application::input_loop()
 void Application::worker_loop()
 {
     try {
+        std::optional<int> pending_sum;
+        bool server_unavailable = false;
+
         while (true) {
-            std::optional<std::string> value = buffer_.take();
+            if (!pending_sum.has_value()) {
+                std::optional<std::string> value = buffer_.take();
 
-            if (!value.has_value()) {
-                break;
+                if (!value.has_value()) {
+                    break;
+                }
+
+                const int sum = processing::calculate_sum(*value);
+                print_result(*value, sum);
+                pending_sum = sum;
             }
-
-            const int sum = processing::calculate_sum(*value);
-            print_result(*value, sum);
 
             if (!client_.is_connected() && !client_.connect()) {
-                print_error("Error: failed to connect to TCP server\n");
+                if (!server_unavailable) {
+                    print_error("Server is unavailable. Retrying...\n");
+                    server_unavailable = true;
+                }
+                if (!wait_for_retry()) {
+                    break;
+                }
                 continue;
             }
 
-            if (!client_.send_line(std::to_string(sum))) {
-                print_error("Error: failed to send sum to TCP server\n");
+            if (server_unavailable) {
+                print_error("Connection restored.\n");
+                server_unavailable = false;
+            }
+
+            if (!client_.send_line(std::to_string(*pending_sum))) {
+                if (!server_unavailable) {
+                    print_error("Server is unavailable. Retrying...\n");
+                    server_unavailable = true;
+                }
+                if (!wait_for_retry()) {
+                    break;
+                }
                 continue;
             }
 
-            print_sent_sum(sum);
+            print_sent_sum(*pending_sum);
+            pending_sum.reset();
         }
     } catch (...) {
         worker_exception_ = std::current_exception();
-        buffer_.stop();
+        stop();
     }
 
     client_.disconnect();
+}
+
+void Application::stop()
+{
+    {
+        std::lock_guard lock{retry_mutex_};
+        stopped_ = true;
+    }
+
+    buffer_.stop();
+    retry_wait_.notify_all();
+}
+
+bool Application::wait_for_retry()
+{
+    std::unique_lock lock{retry_mutex_};
+    return !retry_wait_.wait_for(lock, retry_interval_, [this] {
+        return stopped_;
+    });
 }
 
 void Application::print_prompt()

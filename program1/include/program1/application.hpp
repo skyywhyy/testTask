@@ -4,6 +4,8 @@
 #include <program1/tcp_client.hpp>
 
 #include <cstdint>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <iosfwd>
 #include <mutex>
@@ -23,6 +25,13 @@ public:
         std::ostream& error_output,
         std::string host,
         std::uint16_t port);
+    Application(
+        std::istream& input,
+        std::ostream& output,
+        std::ostream& error_output,
+        std::string host,
+        std::uint16_t port,
+        std::chrono::milliseconds retry_interval);
 
     int run();
 
@@ -31,6 +40,8 @@ private:
 
     void input_loop();
     void worker_loop();
+    void stop();
+    bool wait_for_retry();
     void print_prompt();
     void print_result(const std::string& value, int sum);
     void print_sent_sum(int sum);
@@ -42,6 +53,10 @@ private:
     TcpClient client_;
     SharedBuffer buffer_;
     std::mutex output_mutex_;
+    std::mutex retry_mutex_;
+    std::condition_variable retry_wait_;
+    std::chrono::milliseconds retry_interval_;
+    bool stopped_{false};
     std::exception_ptr worker_exception_;
 };
 
