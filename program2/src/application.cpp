@@ -76,6 +76,9 @@ int Application::run(const volatile std::sig_atomic_t& stop_requested)
             }
 
             processor_.process(*message);
+            if (!server_.send_line("OK")) {
+                break;
+            }
         }
 
         server_.disconnect_client();

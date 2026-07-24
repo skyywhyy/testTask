@@ -15,6 +15,12 @@
 
 namespace program1 {
 
+namespace {
+
+constexpr std::chrono::seconds kAcknowledgementTimeout{2};
+
+}  // namespace
+
 Application::Application(
     std::istream& input,
     std::ostream& output,
@@ -96,10 +102,9 @@ bool Application::is_valid_input(const std::string& value) noexcept
 void Application::input_loop()
 {
     std::string input;
+    print_prompt();
 
     while (true) {
-        print_prompt();
-
         if (!std::getline(input_, input) || input == "exit") {
             return;
         }
@@ -147,12 +152,11 @@ void Application::worker_loop()
                 continue;
             }
 
-            if (server_unavailable) {
-                print_error("Connection restored.\n");
-                server_unavailable = false;
-            }
-
-            if (!client_.send_line(std::to_string(*pending_sum))) {
+            std::string acknowledgement;
+            if (!client_.send_line(std::to_string(*pending_sum))
+                || !client_.receive_line(
+                    acknowledgement, kAcknowledgementTimeout)
+                || acknowledgement != "OK") {
                 if (!server_unavailable) {
                     print_error("Server is unavailable. Retrying...\n");
                     server_unavailable = true;
@@ -161,6 +165,11 @@ void Application::worker_loop()
                     break;
                 }
                 continue;
+            }
+
+            if (server_unavailable) {
+                print_error("Connection restored.\n");
+                server_unavailable = false;
             }
 
             print_sent_sum(*pending_sum);
@@ -196,7 +205,7 @@ bool Application::wait_for_retry()
 void Application::print_prompt()
 {
     std::lock_guard lock{output_mutex_};
-    output_ << "Enter 1 to 64 digits or 'exit': " << std::flush;
+    output_ << "Enter 1 to 64 digits or 'exit':\n" << std::flush;
 }
 
 void Application::print_result(const std::string& value, int sum)

@@ -117,6 +117,73 @@ public:
     RawClient(const RawClient&) = delete;
     RawClient& operator=(const RawClient&) = delete;
 
+    bool send_line(const std::string& message)
+    {
+        std::string line = message;
+        line.push_back('\n');
+
+        std::size_t sent_total = 0;
+        while (sent_total < line.size()) {
+            const auto sent = ::send(
+                descriptor_,
+                line.data() + sent_total,
+                line.size() - sent_total,
+                MSG_NOSIGNAL);
+            if (sent > 0) {
+                sent_total += static_cast<std::size_t>(sent);
+                continue;
+            }
+            if (sent == -1 && errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    std::optional<std::string> receive_line(
+        std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::string line;
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+            pollfd descriptor_event{};
+            descriptor_event.fd = descriptor_;
+            descriptor_event.events = POLLIN;
+
+            const int poll_result = ::poll(
+                &descriptor_event,
+                1,
+                static_cast<int>(remaining.count()));
+            if (poll_result == -1 && errno == EINTR) {
+                continue;
+            }
+            if (poll_result <= 0) {
+                return std::nullopt;
+            }
+
+            char symbol = '\0';
+            const auto received = ::recv(descriptor_, &symbol, 1, 0);
+            if (received == -1 && errno == EINTR) {
+                continue;
+            }
+            if (received != 1) {
+                return std::nullopt;
+            }
+            if (symbol == '\n') {
+                return line;
+            }
+            line.push_back(symbol);
+        }
+
+        return std::nullopt;
+    }
+
     void close()
     {
         if (descriptor_ != -1) {
@@ -335,12 +402,47 @@ void test_sigint_stops_wait_for_message()
     expect_successful_exit(child, "SIGINT stops child waiting for message");
 }
 
+void test_acknowledges_processed_message()
+{
+    const auto port = reserve_unused_port();
+    ChildApplication child{port};
+    test_utils::expect_true(
+        child.wait_for_output("Server is listening"),
+        "server starts before acknowledgement test");
+
+    RawClient client{port};
+    test_utils::expect_true(
+        child.wait_for_output("Client connected."),
+        "server accepts acknowledgement test client");
+    test_utils::expect_true(
+        client.send_line("128"), "client sends sum for acknowledgement");
+
+    const auto acknowledgement = client.receive_line(2s);
+    test_utils::expect_true(
+        acknowledgement.has_value(), "server sends an acknowledgement");
+    if (acknowledgement.has_value()) {
+        test_utils::expect_equal(
+            *acknowledgement,
+            std::string{"OK"},
+            "server acknowledgement has the expected value");
+    }
+    test_utils::expect_true(
+        child.wait_for_output("Received valid sum: 128"),
+        "server processes the message before acknowledging it");
+
+    client.close();
+    test_utils::expect_true(
+        child.interrupt(), "parent stops server after acknowledgement test");
+    expect_successful_exit(child, "server exits after acknowledgement test");
+}
+
 }  // namespace
 
 int main()
 {
     test_sigint_stops_wait_for_client();
     test_sigint_stops_wait_for_message();
+    test_acknowledges_processed_message();
 
     return test_utils::finish();
 }

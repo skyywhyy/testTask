@@ -27,6 +27,7 @@ public:
     bool last_accept_would_block() const noexcept;
     WaitResult wait_for_message(std::chrono::milliseconds timeout);
     std::optional<std::string> receive_line();
+    bool send_line(const std::string& message);
     void disconnect_client();
     void stop();
     std::uint16_t bound_port() const noexcept;

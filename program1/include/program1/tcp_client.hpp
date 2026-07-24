@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -15,6 +16,9 @@ public:
 
     bool connect();
     bool send_line(const std::string& message);
+    bool receive_line(
+        std::string& message,
+        std::chrono::milliseconds timeout);
     void disconnect();
     bool is_connected() const noexcept;
 

@@ -13,6 +13,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -167,7 +168,7 @@ public:
         return port_;
     }
 
-    std::string receive_line() const
+    std::string receive_line(bool acknowledge = true) const
     {
         int client = -1;
         do {
@@ -195,6 +196,31 @@ public:
 
             ::close(client);
             throw std::runtime_error{"failed to receive client line"};
+        }
+
+        if (!acknowledge) {
+            ::close(client);
+            return line;
+        }
+
+        const std::string acknowledgement{"OK\n"};
+        std::size_t sent_total = 0;
+        while (sent_total < acknowledgement.size()) {
+            const auto sent = ::send(
+                client,
+                acknowledgement.data() + sent_total,
+                acknowledgement.size() - sent_total,
+                MSG_NOSIGNAL);
+            if (sent > 0) {
+                sent_total += static_cast<std::size_t>(sent);
+                continue;
+            }
+            if (sent == -1 && errno == EINTR) {
+                continue;
+            }
+
+            ::close(client);
+            throw std::runtime_error{"failed to send acknowledgement"};
         }
 
         pollfd poll_descriptor{};
@@ -292,6 +318,35 @@ public:
             const auto size = ::recv(client, buffer, sizeof(buffer), 0);
             if (size > 0) {
                 received.append(buffer, static_cast<std::size_t>(size));
+
+                std::size_t acknowledged_lines = 0;
+                for (char symbol : std::string{buffer, static_cast<std::size_t>(size)}) {
+                    if (symbol == '\n') {
+                        ++acknowledged_lines;
+                    }
+                }
+                for (std::size_t index = 0; index < acknowledged_lines; ++index) {
+                    const char acknowledgement[] = "OK\n";
+                    std::size_t sent_total = 0;
+                    while (sent_total < sizeof(acknowledgement) - 1) {
+                        const auto sent = ::send(
+                            client,
+                            acknowledgement + sent_total,
+                            sizeof(acknowledgement) - 1 - sent_total,
+                            MSG_NOSIGNAL);
+                        if (sent > 0) {
+                            sent_total += static_cast<std::size_t>(sent);
+                            continue;
+                        }
+                        if (sent == -1 && errno == EINTR) {
+                            continue;
+                        }
+
+                        ::close(client);
+                        throw std::runtime_error{
+                            "failed to send delayed acknowledgement"};
+                    }
+                }
                 continue;
             }
             if (size == -1 && errno == EINTR) {
@@ -355,11 +410,14 @@ void test_sends_sum_to_loopback_server()
     std::ostringstream error_output;
     program1::Application application{
         input, output, error_output, "127.0.0.1", listener.port()};
+    auto received = std::async(std::launch::async, [&listener] {
+        return listener.receive_line();
+    });
 
     test_utils::expect_equal(
         application.run(), 0, "application sends result successfully");
     test_utils::expect_equal(
-        listener.receive_line(), std::string{"9\n"}, "application sends exact sum line");
+        received.get(), std::string{"9\n"}, "application sends exact sum line");
     test_utils::expect_true(
         output.str().find("Sum sent: 9") != std::string::npos,
         "application reports successful send");
@@ -373,6 +431,9 @@ void test_processes_input_and_exits()
     std::ostringstream error_output;
     program1::Application application{
         input, output, error_output, "127.0.0.1", listener.port()};
+    auto received = std::async(std::launch::async, [&listener] {
+        return listener.receive_line();
+    });
 
     test_utils::expect_equal(
         application.run(), 0, "application exits successfully");
@@ -383,7 +444,14 @@ void test_processes_input_and_exits()
         output.str().find("Sum: 9") != std::string::npos,
         "application prints calculated sum");
     test_utils::expect_equal(
-        listener.receive_line(), std::string{"9\n"}, "application sends calculated sum");
+        count_occurrences(output.str(), "Enter 1 to 64 digits or 'exit':"),
+        std::size_t{1},
+        "application prints the input instruction once");
+    test_utils::expect_true(
+        output.str().find("'exit':\nProcessed:") != std::string::npos,
+        "processing output starts on a separate line");
+    test_utils::expect_equal(
+        received.get(), std::string{"9\n"}, "application sends calculated sum");
     test_utils::expect_true(
         error_output.str().empty(), "valid input does not produce errors");
 }
@@ -396,6 +464,9 @@ void test_rejects_invalid_input_and_continues()
     std::ostringstream error_output;
     program1::Application application{
         input, output, error_output, "127.0.0.1", listener.port()};
+    auto received = std::async(std::launch::async, [&listener] {
+        return listener.receive_line();
+    });
 
     test_utils::expect_equal(
         application.run(), 0, "application continues after invalid input");
@@ -409,7 +480,7 @@ void test_rejects_invalid_input_and_continues()
         output.str().find("Sum: 25") != std::string::npos,
         "application calculates the next valid sum");
     test_utils::expect_equal(
-        listener.receive_line(), std::string{"25\n"}, "application sends the next sum");
+        received.get(), std::string{"25\n"}, "application sends the next sum");
 }
 
 void test_stops_on_end_of_input()
@@ -460,6 +531,48 @@ void test_reports_connection_failure_without_crashing()
         error_output.str().find("Server is unavailable. Retrying...")
             != std::string::npos,
         "application reports unavailable server in English");
+}
+
+void test_does_not_report_sent_without_server_acknowledgement()
+{
+    LoopbackListener listener;
+    BlockingInputBuffer input_buffer{"123456\n"};
+    std::istream input{&input_buffer};
+    WaitableStringBuffer output_buffer;
+    WaitableStringBuffer error_buffer;
+    std::ostream output{&output_buffer};
+    std::ostream error_output{&error_buffer};
+    program1::Application application{
+        input, output, error_output, "127.0.0.1", listener.port(), 30ms};
+    std::exception_ptr application_error;
+
+    auto received = std::async(std::launch::async, [&listener] {
+        return listener.receive_line(false);
+    });
+    std::thread application_thread{[&] {
+        try {
+            application.run();
+        } catch (...) {
+            application_error = std::current_exception();
+        }
+    }};
+
+    test_utils::expect_equal(
+        received.get(),
+        std::string{"9\n"},
+        "server receives sum before closing without acknowledgement");
+    const bool retry_started = error_buffer.wait_for_text(
+        "Server is unavailable. Retrying...", 2s);
+    input_buffer.release();
+    application_thread.join();
+
+    test_utils::expect_true(
+        !application_error, "missing acknowledgement does not crash application");
+    test_utils::expect_true(
+        retry_started, "missing acknowledgement starts reconnect");
+    test_utils::expect_true(
+        output_buffer.snapshot().find("Sum sent: 9") == std::string::npos,
+        "application does not report an unacknowledged sum as sent");
 }
 
 void test_retries_pending_sums_after_server_becomes_available()
@@ -566,6 +679,7 @@ int main()
     test_stops_on_end_of_input();
     test_propagates_worker_error_without_terminating();
     test_reports_connection_failure_without_crashing();
+    test_does_not_report_sent_without_server_acknowledgement();
     test_retries_pending_sums_after_server_becomes_available();
     test_stops_retry_wait_promptly_when_input_ends();
 

@@ -2,10 +2,12 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <utility>
 
@@ -82,6 +84,58 @@ bool TcpClient::send_line(const std::string& message)
     }
 
     return true;
+}
+
+bool TcpClient::receive_line(
+    std::string& message,
+    std::chrono::milliseconds timeout)
+{
+    if (descriptor_ == -1) {
+        return false;
+    }
+
+    message.clear();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    while (true) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds::zero()) {
+            disconnect();
+            return false;
+        }
+
+        pollfd descriptor_event{};
+        descriptor_event.fd = descriptor_;
+        descriptor_event.events = POLLIN;
+
+        const int poll_result = ::poll(
+            &descriptor_event,
+            1,
+            static_cast<int>(remaining.count()));
+        if (poll_result == -1 && errno == EINTR) {
+            continue;
+        }
+        if (poll_result <= 0) {
+            disconnect();
+            return false;
+        }
+
+        char symbol = '\0';
+        const auto received = ::recv(descriptor_, &symbol, 1, 0);
+        if (received == -1 && errno == EINTR) {
+            continue;
+        }
+        if (received != 1) {
+            disconnect();
+            return false;
+        }
+        if (symbol == '\n') {
+            return true;
+        }
+
+        message.push_back(symbol);
+    }
 }
 
 void TcpClient::disconnect()
