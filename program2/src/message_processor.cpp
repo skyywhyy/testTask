@@ -27,16 +27,16 @@ MessageProcessor::MessageProcessor(std::ostream& output) : output_{output}
 void MessageProcessor::process(const std::string& value)
 {
     if (!is_valid_message_format(value)) {
-        output_ << "Error: invalid message\n";
+        output_ << "Error: invalid message\n" << std::flush;
         return;
     }
 
     if (!processing::is_valid_sum(value)) {
-        output_ << "Error: sum does not satisfy the condition\n";
+        output_ << "Error: sum does not satisfy the condition\n" << std::flush;
         return;
     }
 
-    output_ << "Received valid sum: " << value << '\n';
+    output_ << "Received valid sum: " << value << '\n' << std::flush;
 }
 
 }  // namespace program2

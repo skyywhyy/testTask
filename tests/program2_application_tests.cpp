@@ -444,5 +444,5 @@ int main()
     test_sigint_stops_wait_for_message();
     test_acknowledges_processed_message();
 
-    return test_utils::finish();
+    return test_utils::finish("program2 application");
 }

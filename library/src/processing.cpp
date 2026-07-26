@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <charconv>
 #include <functional>
-#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -21,27 +20,13 @@ namespace processing {
 
 void transform(std::string& value)
 {
-    if (value.empty()) {
-        throw std::invalid_argument{"Input must not be empty"};
-    }
-
-    if (value.size() > 64) {
-        throw std::invalid_argument{"Input must contain at most 64 digits"};
-    }
-
-    if (!std::all_of(value.begin(), value.end(), is_ascii_digit)) {
-        throw std::invalid_argument{"Input must contain only digits"};
-    }
-
     std::sort(value.begin(), value.end(), std::greater<char>{});
 
     std::string result;
     result.reserve(value.size() * 2);
 
     for (char symbol : value) {
-        const int digit = symbol - '0';
-
-        if (digit % 2 == 0) {
+        if (is_ascii_digit(symbol) && (symbol - '0') % 2 == 0) {
             result += "KB";
         } else {
             result += symbol;

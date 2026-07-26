@@ -26,3 +26,7 @@ target_compile_options(program2
         -Wextra
         -Wpedantic
 )
+
+install(TARGETS program2
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)

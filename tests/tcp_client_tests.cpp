@@ -275,5 +275,5 @@ int main()
     test_disconnect_is_idempotent_and_updates_state();
     test_closed_peer_does_not_raise_sigpipe();
 
-    return test_utils::finish();
+    return test_utils::finish("tcp client");
 }

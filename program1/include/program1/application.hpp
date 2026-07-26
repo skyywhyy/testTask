@@ -3,6 +3,7 @@
 #include <program1/shared_buffer.hpp>
 #include <program1/tcp_client.hpp>
 
+#include <csignal>
 #include <cstdint>
 #include <chrono>
 #include <deque>
@@ -34,16 +35,27 @@ public:
         std::chrono::milliseconds retry_interval);
 
     int run();
+    int run(const volatile std::sig_atomic_t& stop_requested);
 
 private:
+    enum class DeliveryResult {
+        // The second program acknowledged the value.
+        delivered,
+        // The value is on the wire and the acknowledgement is still expected;
+        // the connection is healthy, so the value must not be sent again.
+        pending,
+        // The value could not be handed over and has to be retried.
+        failed,
+    };
+
     static bool is_valid_input(const std::string& value) noexcept;
 
-    void input_loop();
+    void input_loop(const volatile std::sig_atomic_t& stop_requested);
     void worker_loop();
     void drain_buffer();
     void handle_value(std::string value);
     void queue_sum(int sum);
-    bool deliver_sum(int sum);
+    DeliveryResult deliver_sum(int sum);
     void report_unavailable();
     void stop();
     void print_prompt();
@@ -63,6 +75,8 @@ private:
     std::deque<int> pending_sums_;
     bool server_unavailable_{false};
     bool pending_overflow_reported_{false};
+    bool awaiting_acknowledgement_{false};
+    std::chrono::steady_clock::time_point acknowledgement_deadline_{};
 
     std::exception_ptr worker_exception_;
 };

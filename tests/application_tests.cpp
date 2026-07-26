@@ -246,6 +246,173 @@ private:
     std::uint16_t port_{0};
 };
 
+// Accepts one client, reads one line, waits before acknowledging it and then
+// watches the socket to see whether the client sent the line a second time.
+class SlowAcknowledgingListener {
+public:
+    struct Observation {
+        std::string first_line;
+        std::string received_after_acknowledgement;
+    };
+
+    SlowAcknowledgingListener()
+        : descriptor_{::socket(AF_INET, SOCK_STREAM, 0)}
+    {
+        if (descriptor_ == -1) {
+            throw std::runtime_error{"failed to create slow listener socket"};
+        }
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(0);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        if (::bind(
+                descriptor_,
+                reinterpret_cast<const sockaddr*>(&address),
+                sizeof(address)) == -1
+            || ::listen(descriptor_, 1) == -1) {
+            ::close(descriptor_);
+            throw std::runtime_error{"failed to start slow listener"};
+        }
+
+        socklen_t address_size = sizeof(address);
+        if (::getsockname(
+                descriptor_,
+                reinterpret_cast<sockaddr*>(&address),
+                &address_size) == -1) {
+            ::close(descriptor_);
+            throw std::runtime_error{"failed to query slow listener port"};
+        }
+
+        port_ = ntohs(address.sin_port);
+    }
+
+    ~SlowAcknowledgingListener()
+    {
+        if (descriptor_ != -1) {
+            ::close(descriptor_);
+        }
+    }
+
+    SlowAcknowledgingListener(const SlowAcknowledgingListener&) = delete;
+    SlowAcknowledgingListener& operator=(const SlowAcknowledgingListener&) =
+        delete;
+
+    std::uint16_t port() const noexcept
+    {
+        return port_;
+    }
+
+    Observation serve(
+        std::chrono::milliseconds acknowledgement_delay,
+        std::chrono::milliseconds observation_window) const
+    {
+        int client = -1;
+        do {
+            client = ::accept(descriptor_, nullptr, nullptr);
+        } while (client == -1 && errno == EINTR);
+
+        if (client == -1) {
+            throw std::runtime_error{"failed to accept slow listener client"};
+        }
+
+        Observation observation;
+        observation.first_line = read_line(client);
+
+        std::this_thread::sleep_for(acknowledgement_delay);
+
+        const std::string acknowledgement{"OK\n"};
+        std::size_t sent_total = 0;
+        while (sent_total < acknowledgement.size()) {
+            const auto sent = ::send(
+                client,
+                acknowledgement.data() + sent_total,
+                acknowledgement.size() - sent_total,
+                MSG_NOSIGNAL);
+            if (sent > 0) {
+                sent_total += static_cast<std::size_t>(sent);
+                continue;
+            }
+            if (sent == -1 && errno == EINTR) {
+                continue;
+            }
+
+            ::close(client);
+            throw std::runtime_error{"failed to send late acknowledgement"};
+        }
+
+        observation.received_after_acknowledgement =
+            drain(client, observation_window);
+
+        ::close(client);
+        return observation;
+    }
+
+private:
+    static std::string read_line(int client)
+    {
+        std::string line;
+        char character = '\0';
+
+        while (true) {
+            const auto received = ::recv(client, &character, 1, 0);
+            if (received == 1) {
+                line.push_back(character);
+                if (character == '\n') {
+                    return line;
+                }
+                continue;
+            }
+            if (received == -1 && errno == EINTR) {
+                continue;
+            }
+
+            ::close(client);
+            throw std::runtime_error{"failed to receive slow listener line"};
+        }
+    }
+
+    static std::string drain(int client, std::chrono::milliseconds window)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + window;
+        std::string collected;
+
+        while (true) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+            if (remaining <= 0ms) {
+                return collected;
+            }
+
+            pollfd client_descriptor{};
+            client_descriptor.fd = client;
+            client_descriptor.events = POLLIN;
+
+            const int poll_result = ::poll(
+                &client_descriptor, 1, static_cast<int>(remaining.count()));
+            if (poll_result == -1 && errno == EINTR) {
+                continue;
+            }
+            if (poll_result != 1) {
+                return collected;
+            }
+
+            char chunk[64] = {};
+            const auto received = ::recv(client, chunk, sizeof(chunk), 0);
+            if (received <= 0) {
+                return collected;
+            }
+
+            collected.append(chunk, static_cast<std::size_t>(received));
+        }
+    }
+
+    int descriptor_;
+    std::uint16_t port_{0};
+};
+
 class DelayedLoopbackListener {
 public:
     explicit DelayedLoopbackListener(std::uint16_t port)
@@ -758,6 +925,55 @@ void test_delivers_input_buffered_during_an_outage()
     }
 }
 
+void test_slow_acknowledgement_does_not_resend_the_sum()
+{
+    SlowAcknowledgingListener listener;
+    BlockingInputBuffer input_buffer{"123456\n"};
+    std::istream input{&input_buffer};
+    WaitableStringBuffer output_buffer;
+    std::ostream output{&output_buffer};
+    WaitableStringBuffer error_buffer;
+    std::ostream error_output{&error_buffer};
+
+    program1::Application application{
+        input, output, error_output, "127.0.0.1", listener.port()};
+
+    // The delay spans several acknowledgement waits, so the worker has to keep
+    // the connection instead of assuming the value was lost.
+    auto observation = std::async(std::launch::async, [&listener] {
+        return listener.serve(1500ms, 1000ms);
+    });
+
+    std::thread application_thread{[&application] {
+        application.run();
+    }};
+
+    const bool reported = output_buffer.wait_for_text("Sum sent: 9", 5s);
+    const auto result = observation.get();
+
+    input_buffer.release();
+    application_thread.join();
+
+    test_utils::expect_equal(
+        result.first_line,
+        std::string{"9\n"},
+        "application sends the sum once before the acknowledgement");
+    test_utils::expect_equal(
+        result.received_after_acknowledgement,
+        std::string{},
+        "a late acknowledgement does not trigger a resend");
+    test_utils::expect_true(
+        reported, "application reports the sum after the late acknowledgement");
+    test_utils::expect_equal(
+        count_occurrences(output_buffer.snapshot(), "Sum sent: 9"),
+        std::size_t{1},
+        "application reports the sum exactly once");
+    test_utils::expect_true(
+        error_buffer.snapshot().find("Server is unavailable")
+            == std::string::npos,
+        "a slow acknowledgement is not reported as an outage");
+}
+
 }  // namespace
 
 int main()
@@ -773,6 +989,7 @@ int main()
     test_stops_retry_wait_promptly_when_input_ends();
     test_keeps_accepting_input_while_server_is_unavailable();
     test_delivers_input_buffered_during_an_outage();
+    test_slow_acknowledgement_does_not_resend_the_sum();
 
-    return test_utils::finish();
+    return test_utils::finish("program1 application");
 }

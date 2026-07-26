@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -159,23 +160,31 @@ bool TcpClient::send_line(const std::string& message)
     return true;
 }
 
-bool TcpClient::receive_line(
+ReceiveStatus TcpClient::receive_line(
     std::string& message,
     std::chrono::milliseconds timeout)
 {
     if (descriptor_ == -1) {
-        return false;
+        return ReceiveStatus::disconnected;
     }
 
-    message.clear();
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
     while (true) {
+        // Bytes left over from an earlier call may already hold a full line.
+        const auto newline = receive_buffer_.find('\n');
+        if (newline != std::string::npos) {
+            message.assign(receive_buffer_, 0, newline);
+            receive_buffer_.erase(0, newline + 1);
+            return ReceiveStatus::ready;
+        }
+
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
         if (remaining <= std::chrono::milliseconds::zero()) {
-            disconnect();
-            return false;
+            // The connection stays open: an acknowledgement that is merely late
+            // must not look like a lost message and trigger a resend.
+            return ReceiveStatus::timeout;
         }
 
         pollfd descriptor_event{};
@@ -189,25 +198,26 @@ bool TcpClient::receive_line(
         if (poll_result == -1 && errno == EINTR) {
             continue;
         }
-        if (poll_result <= 0) {
+        if (poll_result == 0) {
+            return ReceiveStatus::timeout;
+        }
+        if (poll_result < 0) {
             disconnect();
-            return false;
+            return ReceiveStatus::disconnected;
         }
 
-        char symbol = '\0';
-        const auto received = ::recv(descriptor_, &symbol, 1, 0);
+        std::array<char, 256> chunk{};
+        const auto received = ::recv(descriptor_, chunk.data(), chunk.size(), 0);
         if (received == -1 && errno == EINTR) {
             continue;
         }
-        if (received != 1) {
+        if (received <= 0) {
             disconnect();
-            return false;
-        }
-        if (symbol == '\n') {
-            return true;
+            return ReceiveStatus::disconnected;
         }
 
-        message.push_back(symbol);
+        receive_buffer_.append(
+            chunk.data(), static_cast<std::size_t>(received));
     }
 }
 
@@ -217,6 +227,8 @@ void TcpClient::disconnect()
         ::close(descriptor_);
         descriptor_ = -1;
     }
+
+    receive_buffer_.clear();
 }
 
 bool TcpClient::is_connected() const noexcept
