@@ -5,7 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <condition_variable>
+#include <cstddef>
 #include <istream>
 #include <optional>
 #include <ostream>
@@ -17,7 +17,8 @@ namespace program1 {
 
 namespace {
 
-constexpr std::chrono::seconds kAcknowledgementTimeout{2};
+constexpr std::chrono::milliseconds kAcknowledgementTimeout{500};
+constexpr std::size_t kMaxPendingSums{1024};
 
 }  // namespace
 
@@ -125,55 +126,38 @@ void Application::input_loop()
 void Application::worker_loop()
 {
     try {
-        std::optional<int> pending_sum;
-        bool server_unavailable = false;
-
         while (true) {
-            if (!pending_sum.has_value()) {
-                std::optional<std::string> value = buffer_.take();
+            // Emptying the shared buffer always comes first: the input thread
+            // must never wait for the second program to become reachable.
+            drain_buffer();
 
-                if (!value.has_value()) {
-                    break;
+            if (!pending_sums_.empty()) {
+                if (deliver_sum(pending_sums_.front())) {
+                    pending_sums_.pop_front();
+
+                    if (pending_sums_.empty()) {
+                        pending_overflow_reported_ = false;
+                    }
+
+                    continue;
                 }
 
-                const int sum = processing::calculate_sum(*value);
-                print_result(*value, sum);
-                pending_sum = sum;
+                report_unavailable();
             }
 
-            if (!client_.is_connected() && !client_.connect()) {
-                if (!server_unavailable) {
-                    print_error("Server is unavailable. Retrying...\n");
-                    server_unavailable = true;
-                }
-                if (!wait_for_retry()) {
-                    break;
-                }
-                continue;
+            if (buffer_.stopped()) {
+                break;
             }
 
-            std::string acknowledgement;
-            if (!client_.send_line(std::to_string(*pending_sum))
-                || !client_.receive_line(
-                    acknowledgement, kAcknowledgementTimeout)
-                || acknowledgement != "OK") {
-                if (!server_unavailable) {
-                    print_error("Server is unavailable. Retrying...\n");
-                    server_unavailable = true;
-                }
-                if (!wait_for_retry()) {
-                    break;
-                }
-                continue;
-            }
+            // Waiting on the buffer instead of on a bare timer keeps the retry
+            // interval interruptible by new user input and by shutdown.
+            auto value = pending_sums_.empty()
+                ? buffer_.take()
+                : buffer_.take_for(retry_interval_);
 
-            if (server_unavailable) {
-                print_error("Connection restored.\n");
-                server_unavailable = false;
+            if (value.has_value()) {
+                handle_value(std::move(*value));
             }
-
-            print_sent_sum(*pending_sum);
-            pending_sum.reset();
         }
     } catch (...) {
         worker_exception_ = std::current_exception();
@@ -183,23 +167,76 @@ void Application::worker_loop()
     client_.disconnect();
 }
 
-void Application::stop()
+void Application::drain_buffer()
 {
-    {
-        std::lock_guard lock{retry_mutex_};
-        stopped_ = true;
+    while (auto value = buffer_.try_take()) {
+        handle_value(std::move(*value));
     }
-
-    buffer_.stop();
-    retry_wait_.notify_all();
 }
 
-bool Application::wait_for_retry()
+void Application::handle_value(std::string value)
 {
-    std::unique_lock lock{retry_mutex_};
-    return !retry_wait_.wait_for(lock, retry_interval_, [this] {
-        return stopped_;
-    });
+    const int sum = processing::calculate_sum(value);
+    print_result(value, sum);
+    queue_sum(sum);
+}
+
+void Application::queue_sum(int sum)
+{
+    if (pending_sums_.size() >= kMaxPendingSums) {
+        pending_sums_.pop_front();
+
+        if (!pending_overflow_reported_) {
+            print_error("Undelivered sums overflow: oldest values dropped\n");
+            pending_overflow_reported_ = true;
+        }
+    }
+
+    pending_sums_.push_back(sum);
+}
+
+bool Application::deliver_sum(int sum)
+{
+    if (!client_.is_connected() && !client_.connect()) {
+        return false;
+    }
+
+    if (!client_.send_line(std::to_string(sum))) {
+        return false;
+    }
+
+    std::string acknowledgement;
+    if (!client_.receive_line(acknowledgement, kAcknowledgementTimeout)) {
+        return false;
+    }
+
+    if (acknowledgement != "OK") {
+        client_.disconnect();
+        return false;
+    }
+
+    if (server_unavailable_) {
+        print_error("Connection restored.\n");
+        server_unavailable_ = false;
+    }
+
+    print_sent_sum(sum);
+    return true;
+}
+
+void Application::report_unavailable()
+{
+    if (server_unavailable_) {
+        return;
+    }
+
+    print_error("Server is unavailable. Retrying...\n");
+    server_unavailable_ = true;
+}
+
+void Application::stop()
+{
+    buffer_.stop();
 }
 
 void Application::print_prompt()

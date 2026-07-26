@@ -1,6 +1,7 @@
 #include <program1/tcp_client.hpp>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -12,6 +13,79 @@
 #include <utility>
 
 namespace program1 {
+
+namespace {
+
+constexpr std::chrono::milliseconds kConnectTimeout{500};
+
+bool set_non_blocking(int descriptor, bool enabled)
+{
+    const int flags = ::fcntl(descriptor, F_GETFL, 0);
+    if (flags == -1) {
+        return false;
+    }
+
+    const int updated_flags =
+        enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+
+    return ::fcntl(descriptor, F_SETFL, updated_flags) != -1;
+}
+
+bool connect_within_timeout(
+    int descriptor,
+    const sockaddr_in& address,
+    std::chrono::milliseconds timeout)
+{
+    if (::connect(
+            descriptor,
+            reinterpret_cast<const sockaddr*>(&address),
+            sizeof(address)) == 0) {
+        return true;
+    }
+    if (errno != EINPROGRESS && errno != EINTR) {
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    while (true) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds::zero()) {
+            return false;
+        }
+
+        pollfd descriptor_event{};
+        descriptor_event.fd = descriptor;
+        descriptor_event.events = POLLOUT;
+
+        const int poll_result = ::poll(
+            &descriptor_event,
+            1,
+            static_cast<int>(remaining.count()));
+        if (poll_result == -1 && errno == EINTR) {
+            continue;
+        }
+        if (poll_result != 1) {
+            return false;
+        }
+
+        int socket_error = 0;
+        socklen_t socket_error_size = sizeof(socket_error);
+        if (::getsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_ERROR,
+                &socket_error,
+                &socket_error_size) == -1) {
+            return false;
+        }
+
+        return socket_error == 0;
+    }
+}
+
+}  // namespace
 
 TcpClient::TcpClient(std::string host, std::uint16_t port)
     : host_{std::move(host)}
@@ -43,10 +117,9 @@ bool TcpClient::connect()
         return false;
     }
 
-    if (::connect(
-            descriptor,
-            reinterpret_cast<const sockaddr*>(&address),
-            sizeof(address)) == -1) {
+    if (!set_non_blocking(descriptor, true)
+        || !connect_within_timeout(descriptor, address, kConnectTimeout)
+        || !set_non_blocking(descriptor, false)) {
         ::close(descriptor);
         return false;
     }

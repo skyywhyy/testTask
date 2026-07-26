@@ -669,6 +669,95 @@ void test_stops_retry_wait_promptly_when_input_ends()
         "application interrupts the one-second retry wait promptly");
 }
 
+void test_keeps_accepting_input_while_server_is_unavailable()
+{
+    const auto port = unavailable_loopback_port();
+    BlockingInputBuffer input_buffer{"1\n11\n111\n1111\n11111\n111111\n"};
+    std::istream input{&input_buffer};
+    WaitableStringBuffer output_buffer;
+    WaitableStringBuffer error_buffer;
+    std::ostream output{&output_buffer};
+    std::ostream error_output{&error_buffer};
+    program1::Application application{
+        input, output, error_output, "127.0.0.1", port, 30ms};
+    std::exception_ptr application_error;
+
+    std::thread application_thread{[&] {
+        try {
+            application.run();
+        } catch (...) {
+            application_error = std::current_exception();
+        }
+    }};
+
+    // The server never starts, yet every queued line has to be consumed and
+    // reported: an outage of the second program must not stall user input.
+    const bool last_input_processed = output_buffer.wait_for_text("Sum: 6", 3s);
+    input_buffer.release();
+    application_thread.join();
+
+    test_utils::expect_true(
+        !application_error, "unavailable-server run does not throw");
+    test_utils::expect_true(
+        last_input_processed,
+        "input keeps flowing while the server is unavailable");
+
+    const std::string output_text = output_buffer.snapshot();
+    test_utils::expect_equal(
+        count_occurrences(output_text, "Processed:"),
+        std::size_t{6},
+        "every input is processed while the server is unavailable");
+    test_utils::expect_true(
+        output_text.find("Sum sent:") == std::string::npos,
+        "no sum is reported as sent while the server is unavailable");
+    test_utils::expect_equal(
+        count_occurrences(error_buffer.snapshot(), "Server is unavailable. Retrying..."),
+        std::size_t{1},
+        "unavailable server is reported once per outage");
+}
+
+void test_delivers_input_buffered_during_an_outage()
+{
+    const auto port = unavailable_loopback_port();
+    BlockingInputBuffer input_buffer{"1\n11\n111\n"};
+    std::istream input{&input_buffer};
+    WaitableStringBuffer output_buffer;
+    WaitableStringBuffer error_buffer;
+    std::ostream output{&output_buffer};
+    std::ostream error_output{&error_buffer};
+    program1::Application application{
+        input, output, error_output, "127.0.0.1", port, 30ms};
+    std::exception_ptr application_error;
+
+    std::thread application_thread{[&] {
+        try {
+            application.run();
+        } catch (...) {
+            application_error = std::current_exception();
+        }
+    }};
+
+    const bool inputs_processed = output_buffer.wait_for_text("Sum: 3", 3s);
+    DelayedLoopbackListener listener{port};
+    const auto received = listener.receive_lines(3, 3s);
+    input_buffer.release();
+    application_thread.join();
+
+    test_utils::expect_true(
+        !application_error, "outage recovery run does not throw");
+    test_utils::expect_true(
+        inputs_processed, "all inputs are processed during the outage");
+    test_utils::expect_true(
+        received.has_value(), "server started after the outage receives data");
+
+    if (received.has_value()) {
+        test_utils::expect_equal(
+            *received,
+            std::string{"1\n2\n3\n"},
+            "sums buffered during the outage keep their order");
+    }
+}
+
 }  // namespace
 
 int main()
@@ -682,6 +771,8 @@ int main()
     test_does_not_report_sent_without_server_acknowledgement();
     test_retries_pending_sums_after_server_becomes_available();
     test_stops_retry_wait_promptly_when_input_ends();
+    test_keeps_accepting_input_while_server_is_unavailable();
+    test_delivers_input_buffered_during_an_outage();
 
     return test_utils::finish();
 }
