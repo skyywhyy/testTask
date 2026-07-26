@@ -220,6 +220,37 @@ std::optional<std::string> TcpServer::receive_line()
     }
 }
 
+bool TcpServer::send_line(const std::string& message)
+{
+    if (client_descriptor_ == -1) {
+        return false;
+    }
+
+    std::string line = message;
+    line.push_back('\n');
+
+    std::size_t sent_total = 0;
+    while (sent_total < line.size()) {
+        const auto sent = ::send(
+            client_descriptor_,
+            line.data() + sent_total,
+            line.size() - sent_total,
+            MSG_NOSIGNAL);
+        if (sent > 0) {
+            sent_total += static_cast<std::size_t>(sent);
+            continue;
+        }
+        if (sent == -1 && errno == EINTR) {
+            continue;
+        }
+
+        disconnect_client();
+        return false;
+    }
+
+    return true;
+}
+
 void TcpServer::disconnect_client()
 {
     close_descriptor(client_descriptor_);

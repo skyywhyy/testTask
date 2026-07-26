@@ -148,6 +148,68 @@ void test_stop_wakes_waiting_put_and_keeps_buffered_value()
     test_utils::expect_false(buffer.put("third"), "put stays disabled after stop");
 }
 
+void test_try_take_never_blocks()
+{
+    program1::SharedBuffer buffer;
+
+    const auto started = std::chrono::steady_clock::now();
+    const std::optional<std::string> empty = buffer.try_take();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    test_utils::expect_false(
+        empty.has_value(), "try_take returns nothing on an empty buffer");
+    test_utils::expect_true(
+        elapsed < 50ms, "try_take does not wait on an empty buffer");
+
+    buffer.put("value");
+
+    const std::optional<std::string> value = buffer.try_take();
+    test_utils::expect_true(value.has_value(), "try_take returns a stored value");
+
+    if (value.has_value()) {
+        test_utils::expect_equal(
+            *value, std::string{"value"}, "try_take returns the correct value");
+    }
+}
+
+void test_take_for_times_out_and_wakes_on_put()
+{
+    program1::SharedBuffer buffer;
+
+    const auto started = std::chrono::steady_clock::now();
+    const std::optional<std::string> timed_out = buffer.take_for(50ms);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    test_utils::expect_false(
+        timed_out.has_value(), "take_for gives up on an empty buffer");
+    test_utils::expect_true(elapsed >= 50ms, "take_for waits for the timeout");
+    test_utils::expect_true(elapsed < 2s, "take_for returns after the timeout");
+
+    buffer.put("value");
+
+    const std::optional<std::string> value = buffer.take_for(2s);
+    test_utils::expect_true(
+        value.has_value(), "take_for returns data stored before the call");
+
+    if (value.has_value()) {
+        test_utils::expect_equal(
+            *value, std::string{"value"}, "take_for returns the correct value");
+    }
+}
+
+void test_stopped_reports_shutdown()
+{
+    program1::SharedBuffer buffer;
+
+    test_utils::expect_false(buffer.stopped(), "buffer starts running");
+
+    buffer.stop();
+
+    test_utils::expect_true(buffer.stopped(), "buffer reports stopped state");
+    test_utils::expect_false(
+        buffer.take_for(2s).has_value(), "take_for returns nothing after stop");
+}
+
 }  // namespace
 
 int main()
@@ -157,6 +219,9 @@ int main()
     test_put_waits_for_space_and_preserves_order();
     test_stop_wakes_waiting_take();
     test_stop_wakes_waiting_put_and_keeps_buffered_value();
+    test_try_take_never_blocks();
+    test_take_for_times_out_and_wakes_on_put();
+    test_stopped_reports_shutdown();
 
     return test_utils::finish();
 }
