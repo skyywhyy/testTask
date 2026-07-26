@@ -17,7 +17,14 @@ namespace program1 {
 
 namespace {
 
-constexpr std::chrono::milliseconds kAcknowledgementTimeout{500};
+// How long a single wait for an acknowledgement blocks the worker. Kept short
+// so the worker returns to draining the shared buffer promptly.
+constexpr std::chrono::milliseconds kAcknowledgementSlice{500};
+
+// How long a value may stay unacknowledged on a connection that still looks
+// healthy before the link is treated as dead and the value is sent again.
+constexpr std::chrono::seconds kAcknowledgementDeadline{10};
+
 constexpr std::size_t kMaxPendingSums{1024};
 
 }  // namespace
@@ -69,10 +76,16 @@ Application::Application(
 
 int Application::run()
 {
+    static const volatile std::sig_atomic_t never_stops = 0;
+    return run(never_stops);
+}
+
+int Application::run(const volatile std::sig_atomic_t& stop_requested)
+{
     std::thread worker{&Application::worker_loop, this};
 
     try {
-        input_loop();
+        input_loop(stop_requested);
     } catch (...) {
         stop();
         worker.join();
@@ -100,12 +113,14 @@ bool Application::is_valid_input(const std::string& value) noexcept
     });
 }
 
-void Application::input_loop()
+void Application::input_loop(const volatile std::sig_atomic_t& stop_requested)
 {
     std::string input;
     print_prompt();
 
-    while (true) {
+    while (stop_requested == 0) {
+        // A signal interrupts the pending read, so getline reports failure and
+        // the loop unwinds instead of hanging until the next keypress.
         if (!std::getline(input_, input) || input == "exit") {
             return;
         }
@@ -132,7 +147,9 @@ void Application::worker_loop()
             drain_buffer();
 
             if (!pending_sums_.empty()) {
-                if (deliver_sum(pending_sums_.front())) {
+                const auto result = deliver_sum(pending_sums_.front());
+
+                if (result == DeliveryResult::delivered) {
                     pending_sums_.pop_front();
 
                     if (pending_sums_.empty()) {
@@ -142,7 +159,11 @@ void Application::worker_loop()
                     continue;
                 }
 
-                report_unavailable();
+                // A still-pending acknowledgement is not an outage: the server
+                // is reachable, it just has not answered yet.
+                if (result == DeliveryResult::failed) {
+                    report_unavailable();
+                }
             }
 
             if (buffer_.stopped()) {
@@ -195,24 +216,53 @@ void Application::queue_sum(int sum)
     pending_sums_.push_back(sum);
 }
 
-bool Application::deliver_sum(int sum)
+Application::DeliveryResult Application::deliver_sum(int sum)
 {
-    if (!client_.is_connected() && !client_.connect()) {
-        return false;
+    if (!client_.is_connected()) {
+        // A fresh connection voids any acknowledgement owed on the old one.
+        awaiting_acknowledgement_ = false;
+
+        if (!client_.connect()) {
+            return DeliveryResult::failed;
+        }
     }
 
-    if (!client_.send_line(std::to_string(sum))) {
-        return false;
+    if (!awaiting_acknowledgement_) {
+        if (!client_.send_line(std::to_string(sum))) {
+            return DeliveryResult::failed;
+        }
+
+        awaiting_acknowledgement_ = true;
+        acknowledgement_deadline_ =
+            std::chrono::steady_clock::now() + kAcknowledgementDeadline;
     }
 
     std::string acknowledgement;
-    if (!client_.receive_line(acknowledgement, kAcknowledgementTimeout)) {
-        return false;
+    const auto status =
+        client_.receive_line(acknowledgement, kAcknowledgementSlice);
+
+    if (status == ReceiveStatus::timeout) {
+        // The value may already have been processed, so resending it would make
+        // the second program report it twice. Keep the connection and wait.
+        if (std::chrono::steady_clock::now() < acknowledgement_deadline_) {
+            return DeliveryResult::pending;
+        }
+
+        // Connected but unresponsive for too long: give up on this link.
+        client_.disconnect();
+        return DeliveryResult::failed;
     }
+
+    if (status == ReceiveStatus::disconnected) {
+        awaiting_acknowledgement_ = false;
+        return DeliveryResult::failed;
+    }
+
+    awaiting_acknowledgement_ = false;
 
     if (acknowledgement != "OK") {
         client_.disconnect();
-        return false;
+        return DeliveryResult::failed;
     }
 
     if (server_unavailable_) {
@@ -221,7 +271,7 @@ bool Application::deliver_sum(int sum)
     }
 
     print_sent_sum(sum);
-    return true;
+    return DeliveryResult::delivered;
 }
 
 void Application::report_unavailable()
@@ -249,19 +299,23 @@ void Application::print_result(const std::string& value, int sum)
 {
     std::lock_guard lock{output_mutex_};
     output_ << "Processed: " << value << '\n';
-    output_ << "Sum: " << sum << '\n';
+    output_ << "Sum: " << sum << '\n' << std::flush;
 }
 
 void Application::print_sent_sum(int sum)
 {
     std::lock_guard lock{output_mutex_};
-    output_ << "Sum sent: " << sum << '\n';
+    output_ << "Sum sent: " << sum << '\n' << std::flush;
 }
 
 void Application::print_error(const std::string& message)
 {
     std::lock_guard lock{output_mutex_};
-    error_output_ << message;
+
+    // Flushing the result stream first keeps both streams in the order the user
+    // caused them, even when stdout is a pipe and stderr is not.
+    output_ << std::flush;
+    error_output_ << message << std::flush;
 }
 
 }  // namespace program1

@@ -223,5 +223,5 @@ int main()
     test_take_for_times_out_and_wakes_on_put();
     test_stopped_reports_shutdown();
 
-    return test_utils::finish();
+    return test_utils::finish("shared buffer");
 }

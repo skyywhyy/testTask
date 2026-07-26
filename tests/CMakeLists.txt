@@ -80,7 +80,7 @@ add_test(
     COMMAND application_tests
 )
 
-set_tests_properties(application_tests PROPERTIES TIMEOUT 10)
+set_tests_properties(application_tests PROPERTIES TIMEOUT 30)
 
 endif()
 

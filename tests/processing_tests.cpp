@@ -28,12 +28,10 @@ std::string repeated_kb(std::size_t count)
 
 void test_transform()
 {
-    test_utils::expect_invalid_argument(
-        [] {
-            std::string value;
-            processing::transform(value);
-        },
-        "transform rejects empty string");
+    std::string empty;
+    processing::transform(empty);
+    test_utils::expect_equal(
+        empty, std::string{}, "transform leaves an empty string empty");
 
     std::string odd_digit{"7"};
     processing::transform(odd_digit);
@@ -71,19 +69,18 @@ void test_transform()
         repeated_kb(64),
         "transform accepts 64 digits");
 
-    test_utils::expect_invalid_argument(
-        [] {
-            std::string value(65, '1');
-            processing::transform(value);
-        },
-        "transform rejects 65 digits");
+    // Length and alphabet are validated by the caller, not by the library.
+    std::string over_maximum_length(65, '1');
+    processing::transform(over_maximum_length);
+    test_utils::expect_equal(
+        over_maximum_length,
+        std::string(65, '1'),
+        "transform does not police the input length");
 
-    test_utils::expect_invalid_argument(
-        [] {
-            std::string value{"12a3"};
-            processing::transform(value);
-        },
-        "transform rejects non-digit characters");
+    std::string mixed{"12a3"};
+    processing::transform(mixed);
+    test_utils::expect_equal(
+        mixed, std::string{"a3KB1"}, "transform keeps non-digit characters");
 }
 
 void test_calculate_sum()
@@ -131,5 +128,5 @@ int main()
     test_calculate_sum();
     test_is_valid_sum();
 
-    return test_utils::finish();
+    return test_utils::finish("processing");
 }

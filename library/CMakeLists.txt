@@ -13,3 +13,7 @@ target_compile_options(processing
         -Wextra
         -Wpedantic
 )
+
+install(TARGETS processing
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)

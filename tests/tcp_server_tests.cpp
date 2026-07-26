@@ -284,5 +284,5 @@ int main()
     test_receive_line_blocks_until_split_line_is_complete();
     test_disconnect_drops_partial_line_and_allows_second_client();
 
-    return test_utils::finish();
+    return test_utils::finish("tcp server");
 }

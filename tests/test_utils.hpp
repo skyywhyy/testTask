@@ -1,10 +1,7 @@
 #pragma once
 
-#include <exception>
 #include <iostream>
-#include <stdexcept>
 #include <string_view>
-#include <utility>
 
 namespace test_utils {
 
@@ -43,28 +40,14 @@ inline void expect_false(bool condition, std::string_view test_name)
     }
 }
 
-template <typename Function>
-void expect_invalid_argument(Function&& function, std::string_view test_name)
-{
-    try {
-        std::forward<Function>(function)();
-        report_failure(test_name, "expected std::invalid_argument");
-    } catch (const std::invalid_argument&) {
-    } catch (const std::exception& error) {
-        report_failure(test_name, error.what());
-    } catch (...) {
-        report_failure(test_name, "unexpected non-standard exception");
-    }
-}
-
-inline int finish()
+inline int finish(std::string_view suite_name)
 {
     if (failure_count == 0) {
-        std::cout << "All processing tests passed\n";
+        std::cout << "All " << suite_name << " tests passed\n";
         return 0;
     }
 
-    std::cerr << failure_count << " processing test(s) failed\n";
+    std::cerr << failure_count << ' ' << suite_name << " test(s) failed\n";
     return 1;
 }
 

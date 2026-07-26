@@ -76,5 +76,5 @@ int main()
     test_rejects_sum_that_does_not_satisfy_condition();
     test_rejects_invalid_messages();
 
-    return test_utils::finish();
+    return test_utils::finish("program2 message");
 }

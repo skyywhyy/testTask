@@ -3,6 +3,7 @@
 #include <common/network_config.hpp>
 
 #include <csignal>
+#include <exception>
 #include <iostream>
 
 namespace {
@@ -36,7 +37,15 @@ int main()
         return 1;
     }
 
-    program2::Application application{
-        network_config::kDefaultPort, std::cout, std::cerr};
-    return application.run(stop_requested);
+    try {
+        program2::Application application{
+            network_config::kDefaultPort, std::cout, std::cerr};
+        return application.run(stop_requested);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    } catch (...) {
+        std::cerr << "Error: unknown failure\n";
+        return 1;
+    }
 }
